@@ -14,6 +14,7 @@ import kycRoutes from './api/routes/kycRoutes.js';
 import metricsRoutes from './api/routes/metricsRoutes.js';
 import notificationRoutes from './api/routes/notificationRoutes.js';
 import paymentRoutes from './api/routes/paymentRoutes.js';
+import relayerRoutes from './api/routes/relayerRoutes.js';
 import reputationRoutes from './api/routes/reputationRoutes.js';
 import userRoutes from './api/routes/userRoutes.js';
 import auditRoutes from './api/routes/auditRoutes.js';
@@ -120,6 +121,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/events', eventRoutes);
 app.use('/api/kyc', kycRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/relayer', relayerRoutes);
 app.use('/api/audit', auditRoutes);
 
 app.use((req, res) => {
