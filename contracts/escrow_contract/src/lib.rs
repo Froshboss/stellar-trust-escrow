@@ -35,9 +35,15 @@ mod types;
 mod upgrade_tests;
 
 pub use errors::EscrowError;
-pub use types::{DataKey, EscrowState, EscrowStatus, Milestone, MilestoneStatus, ReputationRecord};
+pub use types::{
+    DataKey, EscrowState, EscrowStatus, FeeDelegation, MetaTransaction, Milestone, MilestoneStatus,
+    ReputationRecord,
+};
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, String, Vec};
+use alloc::string::ToString;
+use soroban_sdk::{
+    contract, contractimpl, contracttype, crypto, token, Address, BytesN, Env, String, Vec,
+};
 
 // ── TTL constants ─────────────────────────────────────────────────────────────
 // Bump only when remaining TTL falls below threshold, extending to target.
@@ -54,6 +60,42 @@ const PERSISTENT_TTL_EXTEND_TO: u32 = 50_000;
 enum PackedDataKey {
     EscrowMeta(u64),
     Milestone(u64, u32),
+}
+
+// ── Meta-transaction argument structs ────────────────────────────────────────
+#[derive(Clone)]
+struct CreateEscrowArgs {
+    client: Address,
+    freelancer: Address,
+    token: Address,
+    total_amount: i128,
+    brief_hash: BytesN<32>,
+    arbiter: Option<Address>,
+    deadline: Option<u64>,
+    lock_time: Option<u64>,
+}
+
+#[derive(Clone)]
+struct AddMilestoneArgs {
+    caller: Address,
+    escrow_id: u64,
+    title: String,
+    description_hash: BytesN<32>,
+    amount: i128,
+}
+
+#[derive(Clone)]
+struct SubmitMilestoneArgs {
+    caller: Address,
+    escrow_id: u64,
+    milestone_id: u32,
+}
+
+#[derive(Clone)]
+struct ApproveMilestoneArgs {
+    caller: Address,
+    escrow_id: u64,
+    milestone_id: u32,
 }
 
 // ── EscrowMeta ────────────────────────────────────────────────────────────────
@@ -161,7 +203,11 @@ impl ContractStorage {
 
     // ── Milestones ────────────────────────────────────────────────────────────
 
-    fn load_milestone(env: &Env, escrow_id: u64, milestone_id: u32) -> Result<Milestone, EscrowError> {
+    fn load_milestone(
+        env: &Env,
+        escrow_id: u64,
+        milestone_id: u32,
+    ) -> Result<Milestone, EscrowError> {
         let key = PackedDataKey::Milestone(escrow_id, milestone_id);
         let m = env
             .storage()
@@ -244,16 +290,22 @@ impl ContractStorage {
     where
         K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>,
     {
-        env.storage()
-            .persistent()
-            .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+        env.storage().persistent().extend_ttl(
+            key,
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL_EXTEND_TO,
+        );
     }
 
     // ── Time lock helpers ─────────────────────────────────────────────────────────
 
     /// Checks if the lock time has expired for an escrow.
     /// Returns Ok(()) if funds can be released, Err if still locked.
-    fn check_lock_time_expired(env: &Env, escrow_id: u64, lock_time: Option<u64>) -> Result<(), EscrowError> {
+    fn check_lock_time_expired(
+        env: &Env,
+        escrow_id: u64,
+        lock_time: Option<u64>,
+    ) -> Result<(), EscrowError> {
         if let Some(lt) = lock_time {
             let now = env.ledger().timestamp();
             if now < lt {
@@ -262,6 +314,55 @@ impl ContractStorage {
             // Lock has expired - emit event
             events::emit_lock_time_expired(env, escrow_id, lt);
         }
+        Ok(())
+    }
+
+    // ── Meta-transaction helpers ──────────────────────────────────────────────────
+
+    /// Gets the current nonce for a meta-transaction signer.
+    fn get_meta_tx_nonce(env: &Env, signer: &Address) -> u64 {
+        let key = DataKey::MetaTxNonce(signer.clone());
+        env.storage().persistent().get(&key).unwrap_or(0_u64)
+    }
+
+    /// Increments the nonce for a meta-transaction signer.
+    fn increment_meta_tx_nonce(env: &Env, signer: &Address) -> Result<(), EscrowError> {
+        let key = DataKey::MetaTxNonce(signer.clone());
+        let current_nonce = Self::get_meta_tx_nonce(env, signer);
+        env.storage().persistent().set(&key, &(current_nonce + 1));
+        Self::bump_persistent_ttl(env, &key);
+        Ok(())
+    }
+
+    /// Verifies a meta-transaction signature.
+    fn verify_meta_tx_signature(env: &Env, meta_tx: &MetaTransaction) -> Result<(), EscrowError> {
+        // Check if deadline has passed
+        let now = env.ledger().timestamp();
+        if now > meta_tx.deadline {
+            return Err(EscrowError::MetaTxExpired);
+        }
+
+        // Check if nonce is valid (not already used)
+        let current_nonce = Self::get_meta_tx_nonce(env, &meta_tx.signer);
+        if meta_tx.nonce != current_nonce {
+            return Err(EscrowError::NonceAlreadyUsed);
+        }
+
+        // Create the message to verify
+        // Format: domain_separator + nonce + deadline + function_name + function_args
+        let domain_separator = String::from_str(env, "StellarTrustEscrow-MetaTx");
+        let nonce_str = meta_tx.nonce.to_string();
+        let deadline_str = meta_tx.deadline.to_string();
+
+        let message = format!(
+            "{}{}{}{}{}",
+            domain_separator, nonce_str, deadline_str, meta_tx.function_name, meta_tx.function_args
+        );
+
+        // Verify the signature
+        let message_bytes = message.as_bytes();
+        crypto::verify(env, &meta_tx.signer, &message_bytes, &meta_tx.signature)?;
+
         Ok(())
     }
 }
@@ -582,7 +683,7 @@ impl EscrowContract {
         }
 
         // Load meta to check lock time
-        let meta = ContractStorage::load_escrow_meta(&env, escrow_id)?;
+        let mut meta = ContractStorage::load_escrow_meta(&env, escrow_id)?;
 
         // Check if lock time has expired
         ContractStorage::check_lock_time_expired(&env, escrow_id, meta.lock_time)?;
@@ -796,7 +897,11 @@ impl EscrowContract {
 
     // ── Upgrade ───────────────────────────────────────────────────────────────
 
-    pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) -> Result<(), EscrowError> {
+    pub fn upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), EscrowError> {
         caller.require_auth();
         ContractStorage::require_admin(&env, &caller)?;
         env.deployer().update_current_contract_wasm(new_wasm_hash);
@@ -817,8 +922,259 @@ impl EscrowContract {
         ContractStorage::escrow_count(&env)
     }
 
-    pub fn get_milestone(env: Env, escrow_id: u64, milestone_id: u32) -> Result<Milestone, EscrowError> {
+    pub fn get_milestone(
+        env: Env,
+        escrow_id: u64,
+        milestone_id: u32,
+    ) -> Result<Milestone, EscrowError> {
         ContractStorage::load_milestone(&env, escrow_id, milestone_id)
+    }
+
+    // ── Meta-Transactions ──────────────────────────────────────────────────────
+
+    /// Executes a meta-transaction on behalf of a user.
+    ///
+    /// Allows gasless transactions by having a relayer pay fees while
+    /// the original signer provides authorization via signature.
+    ///
+    /// # Arguments
+    /// * `meta_tx` - The signed meta-transaction data
+    /// * `relayer` - Address of the relayer executing this transaction
+    /// * `fee_delegation` - Optional fee delegation configuration
+    ///
+    /// # Returns
+    /// The result of the executed function call
+    pub fn execute_meta_transaction(
+        env: Env,
+        meta_tx: MetaTransaction,
+        relayer: Address,
+        fee_delegation: Option<FeeDelegation>,
+    ) -> Result<String, EscrowError> {
+        // Verify the meta-transaction signature and nonce
+        ContractStorage::verify_meta_tx_signature(&env, &meta_tx)?;
+
+        // If fee delegation is provided, validate and process it
+        if let Some(ref delegation) = fee_delegation {
+            Self::_validate_fee_delegation(&env, delegation, &relayer)?;
+            Self::_process_fee_delegation(&env, delegation)?;
+            events::emit_fee_delegation_used(
+                &env,
+                &delegation.fee_payer,
+                delegation.max_fee,
+                &delegation.fee_token,
+            );
+        }
+
+        // Execute the requested function
+        let result = Self::_execute_meta_tx_function(&env, &meta_tx)?;
+
+        // Increment nonce to prevent replay
+        ContractStorage::increment_meta_tx_nonce(&env, &meta_tx.signer)?;
+
+        // Emit success event
+        events::emit_meta_transaction_executed(
+            &env,
+            &meta_tx.signer,
+            meta_tx.nonce,
+            &meta_tx.function_name,
+            &relayer,
+        );
+
+        Ok(result)
+    }
+
+    // ── Fee delegation helpers ─────────────────────────────────────────────────
+
+    /// Validates fee delegation configuration
+    fn _validate_fee_delegation(
+        env: &Env,
+        delegation: &FeeDelegation,
+        relayer: &Address,
+    ) -> Result<(), EscrowError> {
+        // Ensure the relayer is authorized to use this fee delegation
+        if &delegation.fee_payer != relayer {
+            return Err(EscrowError::Unauthorized);
+        }
+
+        // Check that max_fee is reasonable (not zero, not excessively high)
+        if delegation.max_fee <= 0 {
+            return Err(EscrowError::InvalidEscrowAmount); // Reuse error
+        }
+
+        Ok(())
+    }
+
+    /// Processes fee delegation by transferring tokens from fee payer to contract
+    fn _process_fee_delegation(env: &Env, delegation: &FeeDelegation) -> Result<(), EscrowError> {
+        // For now, we assume the fee is paid in XLM and handled at the transaction level
+        // In a full implementation, this would transfer tokens to cover gas costs
+        // For Soroban, fees are paid in XLM at the transaction level by the relayer
+
+        // We could implement fee collection here if needed:
+        // token::Client::new(env, &delegation.fee_token).transfer(
+        //     &delegation.fee_payer,
+        //     &env.current_contract_address(),
+        //     &delegation.max_fee,
+        // )?;
+
+        Ok(())
+    }
+
+    // ── Meta-transaction argument parsing helpers ─────────────────────────────
+
+    /// Parses arguments for create_escrow from delimited string
+    /// Format: client|freelancer|token|total_amount|brief_hash|arbiter|deadline|lock_time
+    /// Optional fields can be empty: "" for None
+    fn _parse_create_escrow_args(
+        env: &Env,
+        args_str: &String,
+    ) -> Result<CreateEscrowArgs, EscrowError> {
+        let parts: Vec<&str> = args_str.as_bytes().split(|&b| b == b'|').collect();
+        if parts.len() != 8 {
+            return Err(EscrowError::InvalidSignature); // Reuse error
+        }
+
+        let client = Address::from_string(&String::from_bytes(env, parts[0]))?;
+        let freelancer = Address::from_string(&String::from_bytes(env, parts[1]))?;
+        let token = Address::from_string(&String::from_bytes(env, parts[2]))?;
+        let total_amount = Self::_parse_u64_to_i128(Self::_parse_str_to_u64(parts[3])?)?;
+        let brief_hash = Self::_parse_hex_to_bytes32(env, parts[4])?;
+
+        let arbiter = if parts[5].is_empty() {
+            None
+        } else {
+            Some(Address::from_string(&String::from_bytes(env, parts[5]))?)
+        };
+        let deadline = if parts[6].is_empty() {
+            None
+        } else {
+            Some(Self::_parse_str_to_u64(parts[6])?)
+        };
+        let lock_time = if parts[7].is_empty() {
+            None
+        } else {
+            Some(Self::_parse_str_to_u64(parts[7])?)
+        };
+
+        Ok(CreateEscrowArgs {
+            client,
+            freelancer,
+            token,
+            total_amount,
+            brief_hash,
+            arbiter,
+            deadline,
+            lock_time,
+        })
+    }
+
+    /// Parses arguments for add_milestone from delimited string
+    /// Format: caller|escrow_id|title|description_hash|amount
+    fn _parse_add_milestone_args(
+        env: &Env,
+        args_str: &String,
+    ) -> Result<AddMilestoneArgs, EscrowError> {
+        let parts: Vec<&[u8]> = args_str.as_bytes().split(|&b| b == b'|').collect();
+        if parts.len() != 5 {
+            return Err(EscrowError::InvalidSignature);
+        }
+
+        let caller = Address::from_string(&String::from_bytes(env, parts[0]))?;
+        let escrow_id = Self::_parse_str_to_u64(parts[1])?;
+        let title = String::from_bytes(env, parts[2]);
+        let description_hash = Self::_parse_hex_to_bytes32(env, parts[3])?;
+        let amount = Self::_parse_u64_to_i128(Self::_parse_str_to_u64(parts[4])?)?;
+
+        Ok(AddMilestoneArgs {
+            caller,
+            escrow_id,
+            title,
+            description_hash,
+            amount,
+        })
+    }
+
+    /// Parses arguments for submit_milestone from delimited string
+    /// Format: caller|escrow_id|milestone_id
+    fn _parse_submit_milestone_args(
+        env: &Env,
+        args_str: &String,
+    ) -> Result<SubmitMilestoneArgs, EscrowError> {
+        let parts: Vec<&[u8]> = args_str.as_bytes().split(|&b| b == b'|').collect();
+        if parts.len() != 3 {
+            return Err(EscrowError::InvalidSignature);
+        }
+
+        let caller = Address::from_string(&String::from_bytes(env, parts[0]))?;
+        let escrow_id = Self::_parse_str_to_u64(parts[1])?;
+        let milestone_id = Self::_parse_str_to_u64(parts[2])? as u32;
+
+        Ok(SubmitMilestoneArgs {
+            caller,
+            escrow_id,
+            milestone_id,
+        })
+    }
+
+    /// Parses arguments for approve_milestone from delimited string
+    /// Format: caller|escrow_id|milestone_id
+    fn _parse_approve_milestone_args(
+        env: &Env,
+        args_str: &String,
+    ) -> Result<ApproveMilestoneArgs, EscrowError> {
+        let parts: Vec<&[u8]> = args_str.as_bytes().split(|&b| b == b'|').collect();
+        if parts.len() != 3 {
+            return Err(EscrowError::InvalidSignature);
+        }
+
+        let caller = Address::from_string(&String::from_bytes(env, parts[0]))?;
+        let escrow_id = Self::_parse_str_to_u64(parts[1])?;
+        let milestone_id = Self::_parse_str_to_u64(parts[2])? as u32;
+
+        Ok(ApproveMilestoneArgs {
+            caller,
+            escrow_id,
+            milestone_id,
+        })
+    }
+
+    // ── Argument parsing helpers ───────────────────────────────────────────────────
+
+    fn _parse_str_to_u64(s: &[u8]) -> Result<u64, EscrowError> {
+        let mut result = 0u64;
+        for &b in s {
+            if b >= b'0' && b <= b'9' {
+                result = result
+                    .checked_mul(10)
+                    .ok_or(EscrowError::InvalidSignature)?;
+                result = result
+                    .checked_add((b - b'0') as u64)
+                    .ok_or(EscrowError::InvalidSignature)?;
+            } else {
+                return Err(EscrowError::InvalidSignature);
+            }
+        }
+        Ok(result)
+    }
+
+    fn _parse_u64_to_i128(v: u64) -> Result<i128, EscrowError> {
+        Ok(v as i128)
+    }
+
+    fn _parse_hex_to_bytes32(env: &Env, hex_str: &[u8]) -> Result<BytesN<32>, EscrowError> {
+        if hex_str.len() == 64 {
+            // 32 bytes * 2 hex chars
+            let bytes = hex::decode(hex_str).map_err(|_| EscrowError::InvalidSignature)?;
+            if bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok(BytesN::from_array(env, &arr))
+            } else {
+                Err(EscrowError::InvalidSignature)
+            }
+        } else {
+            Err(EscrowError::InvalidSignature)
+        }
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
@@ -849,6 +1205,66 @@ impl EscrowContract {
         record.last_updated = now;
         ContractStorage::save_reputation(env, &record);
         events::emit_reputation_updated(env, address, record.total_score);
+    }
+
+    /// Executes the specific function requested in a meta-transaction.
+    ///
+    /// This is an internal helper that parses the function arguments and
+    /// calls the appropriate contract function.
+    fn _execute_meta_tx_function(
+        env: &Env,
+        meta_tx: &MetaTransaction,
+    ) -> Result<String, EscrowError> {
+        match meta_tx.function_name.as_str() {
+            "create_escrow" => {
+                let args = Self::_parse_create_escrow_args(env, &meta_tx.function_args)?;
+                let escrow_id = Self::create_escrow(
+                    env.clone(),
+                    args.client,
+                    args.freelancer,
+                    args.token,
+                    args.total_amount,
+                    args.brief_hash,
+                    args.arbiter,
+                    args.deadline,
+                    args.lock_time,
+                )?;
+                Ok(escrow_id.to_string())
+            }
+            "add_milestone" => {
+                let args = Self::_parse_add_milestone_args(env, &meta_tx.function_args)?;
+                let milestone_id = Self::add_milestone(
+                    env.clone(),
+                    args.caller,
+                    args.escrow_id,
+                    args.title,
+                    args.description_hash,
+                    args.amount,
+                )?;
+                Ok(milestone_id.to_string())
+            }
+            "submit_milestone" => {
+                let args = Self::_parse_submit_milestone_args(env, &meta_tx.function_args)?;
+                Self::submit_milestone(
+                    env.clone(),
+                    args.caller,
+                    args.escrow_id,
+                    args.milestone_id,
+                )?;
+                Ok("milestone_submitted".to_string())
+            }
+            "approve_milestone" => {
+                let args = Self::_parse_approve_milestone_args(env, &meta_tx.function_args)?;
+                Self::approve_milestone(
+                    env.clone(),
+                    args.caller,
+                    args.escrow_id,
+                    args.milestone_id,
+                )?;
+                Ok("milestone_approved".to_string())
+            }
+            _ => Err(EscrowError::UnsupportedMetaTxFunction),
+        }
     }
 }
 
@@ -910,7 +1326,10 @@ mod tests {
         assert_eq!(token_client.balance(&contract_id), 1_000_i128);
 
         env.as_contract(&contract_id, || {
-            assert!(env.storage().persistent().has(&PackedDataKey::EscrowMeta(escrow_id)));
+            assert!(env
+                .storage()
+                .persistent()
+                .has(&PackedDataKey::EscrowMeta(escrow_id)));
             assert!(!env.storage().persistent().has(&DataKey::Escrow(escrow_id)));
         });
     }

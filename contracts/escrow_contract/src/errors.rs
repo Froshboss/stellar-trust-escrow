@@ -87,4 +87,16 @@ pub enum EscrowError {
     LockTimeExpired = 28,
     /// Cannot extend lock time to the past.
     InvalidLockTimeExtension = 29,
+
+    // ── Meta-Transactions ───────────────────────────────────────────────────────
+    /// Invalid signature provided for meta-transaction.
+    InvalidSignature = 30,
+    /// Meta-transaction nonce has already been used.
+    NonceAlreadyUsed = 31,
+    /// Meta-transaction has expired (deadline passed).
+    MetaTxExpired = 32,
+    /// Meta-transaction function is not supported.
+    UnsupportedMetaTxFunction = 33,
+    /// Fee delegation amount exceeds maximum allowed.
+    FeeDelegationExceeded = 34,
 }

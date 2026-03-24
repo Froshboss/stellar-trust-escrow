@@ -9,7 +9,7 @@
 
 #![allow(dead_code)]
 
-use soroban_sdk::{symbol_short, Address, Env};
+use soroban_sdk::{symbol_short, Address, Env, String};
 
 /// Emitted when a new escrow is created and funds are locked.
 ///
@@ -94,12 +94,7 @@ pub fn emit_milestone_rejected(env: &Env, escrow_id: u64, milestone_id: u32, cli
 /// * `escrow_id`    - The escrow ID
 /// * `milestone_id` - The disputed milestone
 /// * `raised_by`    - Address of the party raising the dispute
-pub fn emit_milestone_disputed(
-    env: &Env,
-    escrow_id: u64,
-    milestone_id: u32,
-    raised_by: &Address,
-) {
+pub fn emit_milestone_disputed(env: &Env, escrow_id: u64, milestone_id: u32, raised_by: &Address) {
     env.events().publish(
         (symbol_short!("mil_dis"), escrow_id),
         (milestone_id, raised_by.clone()),
@@ -206,5 +201,38 @@ pub fn emit_lock_time_extended(
     env.events().publish(
         (symbol_short!("lock_ext"), escrow_id),
         (old_lock_time, new_lock_time, extended_by.clone()),
+    );
+}
+
+/// Emitted when a meta-transaction is executed successfully.
+///
+/// # Arguments
+/// * `signer`     - Address of the user who signed the meta-transaction
+/// * `nonce`      - The nonce used in the meta-transaction
+/// * `function`   - Name of the function that was executed
+/// * `relayer`    - Address of the relayer who executed the transaction
+pub fn emit_meta_transaction_executed(
+    env: &Env,
+    signer: &Address,
+    nonce: u64,
+    function: &String,
+    relayer: &Address,
+) {
+    env.events().publish(
+        (symbol_short!("meta_tx"), signer.clone()),
+        (nonce, function.clone(), relayer.clone()),
+    );
+}
+
+/// Emitted when fee delegation is used for a meta-transaction.
+///
+/// # Arguments
+/// * `fee_payer`  - Address that paid the transaction fees
+/// * `amount`     - Amount of fees paid
+/// * `token`      - Token used for fee payment
+pub fn emit_fee_delegation_used(env: &Env, fee_payer: &Address, amount: i128, token: &Address) {
+    env.events().publish(
+        (symbol_short!("fee_del"), fee_payer.clone()),
+        (amount, token.clone()),
     );
 }
