@@ -1,6 +1,3 @@
-/* eslint-disable no-undef */
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable @typescript-eslint/no-require-imports */
 /**
  * Smart Contract Event Indexer
  *
@@ -39,7 +36,7 @@ const POLL_INTERVAL_MS = parseInt(process.env.INDEXER_POLL_INTERVAL_MS || '5000'
  * Converts a Soroban ScVal to a plain JS value for storage.
  * The Stellar SDK exposes a `.value()` helper on ScVal objects.
  */
-const scValToJs = (scVal) => {
+const _scValToJs = (scVal) => {
   if (scVal == null) return null;
   try {
     // SDK v12 exposes scValToNative

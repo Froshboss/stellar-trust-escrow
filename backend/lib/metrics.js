@@ -12,7 +12,6 @@
  *  - Node.js default metrics (event loop lag, heap, GC, etc.)
  */
 
-/* eslint-disable no-undef */
 import client from 'prom-client';
 
 // ── Registry ──────────────────────────────────────────────────────────────────
@@ -160,6 +159,30 @@ export const errorsTotal = new client.Counter({
   name: 'errors_total',
   help: 'Total number of application errors',
   labelNames: ['type', 'route'],
+  registers: [register],
+});
+
+// ── Compression Metrics ───────────────────────────────────────────────────────
+
+export const compressedResponsesTotal = new client.Counter({
+  name: 'http_compressed_responses_total',
+  help: 'Total number of compressed HTTP responses',
+  labelNames: ['algorithm', 'route'],
+  registers: [register],
+});
+
+export const compressionBytesTotal = new client.Counter({
+  name: 'http_compression_bytes_total',
+  help: 'Total bytes before and after compression',
+  labelNames: ['direction', 'algorithm'], // direction: original | compressed
+  registers: [register],
+});
+
+export const compressionRatio = new client.Histogram({
+  name: 'http_compression_ratio',
+  help: 'Ratio of compressed size to original size (lower is better)',
+  labelNames: ['algorithm', 'route'],
+  buckets: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
   registers: [register],
 });
 

@@ -88,15 +88,27 @@ pub enum EscrowError {
     /// Cannot extend lock time to the past.
     InvalidLockTimeExtension = 29,
 
-    // ── Meta-Transactions ───────────────────────────────────────────────────────
-    /// Invalid signature provided for meta-transaction.
-    InvalidSignature = 30,
-    /// Meta-transaction nonce has already been used.
-    NonceAlreadyUsed = 31,
-    /// Meta-transaction has expired (deadline passed).
-    MetaTxExpired = 32,
-    /// Meta-transaction function is not supported.
-    UnsupportedMetaTxFunction = 33,
-    /// Fee delegation amount exceeds maximum allowed.
-    FeeDelegationExceeded = 34,
+    // ── Cancellation ───────────────────────────────────────────────────────────
+    /// Cancellation request not found.
+    CancellationNotFound = 30,
+    /// Cancellation request already exists.
+    CancellationAlreadyExists = 31,
+    /// Cancellation has already been disputed.
+    CancellationAlreadyDisputed = 32,
+    /// Cancellation dispute period is still active.
+    CancellationDisputePeriodActive = 33,
+    /// Cancellation dispute deadline has expired.
+    CancellationDisputeDeadlineExpired = 34,
+    /// Cancellation has been disputed and cannot be executed.
+    CancellationDisputed = 35,
+
+    // ── Slashing ─────────────────────────────────────────────────────────────
+    /// Slash record not found.
+    SlashNotFound = 36,
+    /// Slash has already been disputed.
+    SlashAlreadyDisputed = 37,
+    /// Slash dispute deadline has expired.
+    SlashDisputeDeadlineExpired = 38,
+    /// Invalid slash amount.
+    InvalidSlashAmount = 39,
 }
